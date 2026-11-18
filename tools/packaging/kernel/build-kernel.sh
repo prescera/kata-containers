@@ -293,7 +293,15 @@ get_kernel_frag_path() {
 		all_configs="${all_configs} ${gpu_configs}"
 	fi
 
-	if [[ "${measured_rootfs}" == "true" ]]; then
+	# Storage protection is a property of being a confidential guest, not of
+	# having a measured rootfs. Tying the two means a confidential guest built
+	# without measured rootfs -- every -g nvidia -x build, for instance --
+	# ships without DM_CRYPT and cannot open a LUKS volume at all: not by
+	# cryptsetup in the workload, and not by confidential-data-hub either,
+	# since that needs the same dm-crypt. Encrypted model weights and
+	# confidential GPU inference become mutually exclusive, which is not a
+	# trade-off anyone chose.
+	if [[ "${measured_rootfs}" == "true" ]] || [[ -n "${conf_guest}" ]]; then
 		info "Enabling config for confidential guest trust storage protection"
 		local cryptsetup_configs
 		cryptsetup_configs="$(ls "${common_path}"/confidential_containers/cryptsetup.conf)"
