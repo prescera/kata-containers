@@ -111,6 +111,17 @@ pub(crate) async fn generate_shared_path(
     let host_path = do_get_host_path(&mount_name, sid, device_id, true, false);
 
     if get_mount_path(&Some(dest)).starts_with("/dev") {
+        // Create the parent first. The non-/dev branch below gets it for free
+        // from create_dir_all, and with a shared filesystem the passthrough
+        // directory already exists because share-fs made it. A confidential
+        // guest has shared_fs = "none", so nothing has created it, and
+        // File::create then fails with ENOENT on a path whose parent is
+        // missing -- which is precisely the case of handing a block device to
+        // a confidential guest.
+        if let Some(parent) = std::path::Path::new(&host_path).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("failed to create dir {:?}: {:?}", parent, e))?;
+        }
         fs::File::create(&host_path).context(format!("failed to create file {:?}", host_path))?;
     } else {
         std::fs::create_dir_all(&host_path)
@@ -272,6 +283,49 @@ mod tests {
             .arg("test_generate_shared_path_read_only")
             .arg("--test-threads=1")
             .env(GENERATE_SHARED_PATH_TEST_ENV, "1")
+            .env("XDG_RUNTIME_DIR", temp_dir.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "isolated shared-path test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    const GENERATE_SHARED_PATH_DEV_TEST_ENV: &str = "KATA_TEST_GENERATE_SHARED_PATH_DEV";
+
+    // A block volume with a /dev destination, in a sandbox with no shared
+    // filesystem (shared_fs = "none", as in a confidential guest): nothing has
+    // created the passthrough directory, so generate_shared_path must.
+    #[tokio::test]
+    async fn test_generate_shared_path_dev_destination_without_shared_fs() {
+        if std::env::var_os(GENERATE_SHARED_PATH_DEV_TEST_ENV).is_some() {
+            kata_types::rootless::set_rootless(true);
+
+            let sid = "test-sandbox-dev";
+            let device_id = "test-device";
+            let passthrough = crate::share_fs::get_host_rw_shared_path(sid).join("passthrough");
+            assert!(!passthrough.exists());
+
+            let guest_path =
+                generate_shared_path(PathBuf::from("/dev/test-volume"), device_id, sid)
+                    .await
+                    .unwrap();
+            let mount_name = Path::new(&guest_path).file_name().unwrap();
+
+            assert!(passthrough.join(mount_name).is_file());
+            return;
+        }
+
+        // Rootless state is process-global, so isolate it from parallel tests.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("test_generate_shared_path_dev_destination_without_shared_fs")
+            .arg("--test-threads=1")
+            .env(GENERATE_SHARED_PATH_DEV_TEST_ENV, "1")
             .env("XDG_RUNTIME_DIR", temp_dir.path())
             .output()
             .unwrap();
