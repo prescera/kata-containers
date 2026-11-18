@@ -39,6 +39,30 @@ pub struct Volumes {
     pub emptyDir_memory: EmptyDirVolume,
     pub configMap: ConfigMapVolume,
     pub image_volume: ImageVolume,
+    pub hostPath_block: BlockHostPathVolume,
+}
+
+/// Settings for a hostPath volume that resolves to a block device.
+///
+/// Such a volume cannot be described the way a hostPath directory is. A
+/// confidential guest has no shared filesystem, so the runtime attaches the
+/// device to the VM and mounts it inside the guest at
+/// `$(spath)/<base64url(device id)>` -- a path that only exists once the
+/// sandbox is running. The policy therefore describes a mount with no source,
+/// tied to a Storage entry by device id, which is the shape rules.rego already
+/// accepts for block-backed volumes.
+///
+/// `source` and `options` are deliberately absent: the device id is assigned at
+/// run time, and the options follow from the mount's own access mode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockHostPathVolume {
+    pub mount_type: String,
+    pub mount_source: String,
+    pub mount_point: String,
+    pub driver: String,
+    pub driver_options: Vec<String>,
+    pub fstype: String,
+    pub shared: bool,
 }
 
 /// EmptyDir volume settings loaded from genpolicy-settings.json.

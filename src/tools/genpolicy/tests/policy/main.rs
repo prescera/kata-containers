@@ -414,6 +414,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_container_volumes_hostpath_block() {
+        runtests("createcontainer/volumes/hostpath_block").await;
+    }
+
+    #[tokio::test]
     async fn test_create_container_volumes_config_map() {
         runtests("createcontainer/volumes/config_map").await;
     }

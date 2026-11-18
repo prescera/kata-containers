@@ -128,7 +128,7 @@ pub fn get_mount_and_storage(
     } else if yaml_volume.persistentVolumeClaim.is_some() || yaml_volume.azureFile.is_some() {
         get_shared_bind_mount(yaml_mount, p_mounts, "rprivate", "rw");
     } else if yaml_volume.hostPath.is_some() {
-        get_host_path_mount(yaml_mount, yaml_volume, p_mounts);
+        get_host_path_mount(settings, p_mounts, storages, yaml_volume, yaml_mount);
     } else if yaml_volume.configMap.is_some() || yaml_volume.secret.is_some() {
         get_config_map_mount_and_storage(settings, p_mounts, storages, yaml_mount);
     } else if yaml_volume.projected.is_some() {
@@ -284,12 +284,25 @@ fn get_guest_empty_dir_mount_and_storage(
 }
 
 fn get_host_path_mount(
-    yaml_mount: &pod::VolumeMount,
-    yaml_volume: &volume::Volume,
+    settings: &settings::Settings,
     p_mounts: &mut Vec<policy::KataMount>,
+    storages: &mut Vec<agent::Storage>,
+    yaml_volume: &volume::Volume,
+    yaml_mount: &pod::VolumeMount,
 ) {
-    let host_path = yaml_volume.hostPath.as_ref().unwrap().path.clone();
+    let host_path_volume = yaml_volume.hostPath.as_ref().unwrap();
+    let host_path = host_path_volume.path.clone();
     let path = Path::new(&host_path);
+
+    // A hostPath declared as a block device never reaches the guest as a path.
+    // The runtime attaches the device to the VM and mounts it inside the guest
+    // at $(spath)/<base64url(device id)>, so describing it by its host path --
+    // which is what the /dev/ carve-out below would do -- produces a policy
+    // that can never match. Describe it as a block volume instead.
+    if host_path_volume.r#type.as_deref() == Some("BlockDevice") {
+        get_block_host_path_mount_and_storage(settings, p_mounts, storages, yaml_mount);
+        return;
+    }
 
     let mut biderectional = false;
     if let Some(mount_propagation) = &yaml_mount.mountPropagation {
@@ -343,6 +356,101 @@ fn get_host_path_mount(
             });
         }
     }
+}
+
+/// Describe a hostPath volume that resolves to a block device.
+///
+/// This mirrors what the runtime does in handle_block_volume(): the device is
+/// attached to the VM and mounted inside the guest at
+/// $(spath)/<base64url(device id)>, and the container then bind-mounts from
+/// there to its own destination. rules.rego matches that through its
+/// block-volume branch -- a mount whose source is empty, paired with a Storage
+/// entry whose mount_point is derived from the device id.
+///
+/// The option handling below follows the runtime rather than inventing its own:
+/// the Storage options are the mount's options with the bind flags filtered
+/// out, and when the destination is under /dev/ the unfiltered options are
+/// appended and the filesystem type becomes "bind" -- the device node is passed
+/// through as-is with no filesystem mounted on it. That is the case that
+/// matters here: a LUKS volume must reach the workload unopened, so that the
+/// key never has to exist outside the guest.
+fn get_block_host_path_mount_and_storage(
+    settings: &settings::Settings,
+    p_mounts: &mut Vec<policy::KataMount>,
+    storages: &mut Vec<agent::Storage>,
+    yaml_mount: &pod::VolumeMount,
+) {
+    let volume = &settings.volumes.hostPath_block;
+
+    let access = match yaml_mount.readOnly {
+        Some(true) => {
+            debug!("setting read only access for block hostPath mount");
+            "ro"
+        }
+        _ => "rw",
+    };
+
+    let mount_options = vec![
+        "rbind".to_string(),
+        "rprivate".to_string(),
+        access.to_string(),
+    ];
+
+    // The runtime strips the bind flags from the options it puts on Storage.
+    let mut storage_options: Vec<String> = mount_options
+        .iter()
+        .filter(|o| o.as_str() != "bind" && o.as_str() != "rbind")
+        .cloned()
+        .collect();
+    if access == "ro" && !storage_options.iter().any(|o| o == "ro") {
+        storage_options.push("ro".to_string());
+    }
+
+    // A destination under /dev/ means the device node itself is handed to the
+    // container, with no filesystem mounted on it.
+    let passthrough = yaml_mount.mountPath.starts_with("/dev");
+    let fstype = if passthrough {
+        storage_options.extend(mount_options.iter().cloned());
+        "bind".to_string()
+    } else {
+        volume.fstype.clone()
+    };
+
+    // The guest-side mount point cannot be written out literally: the runtime
+    // builds it as "<10 chars of device id>-<8 hex of a random uuid>-<file
+    // name>" under the shared-containers passthrough directory, and the uuid
+    // is fresh per sandbox. So the policy carries a REGEX, which is what
+    // allow_mount_point matches for a bind-type storage.
+    //
+    // Only the trailing file name is known ahead of time; it comes from the
+    // mount destination, and pinning it is what stops this entry authorising
+    // some other volume.
+    let file_name = Path::new(&yaml_mount.mountPath)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mount_point = volume
+        .mount_point
+        .replace("$(file_name)", &regex::escape(&file_name));
+
+    storages.push(agent::Storage {
+        driver: volume.driver.clone(),
+        driver_options: volume.driver_options.clone(),
+        source: String::new(),
+        fstype,
+        options: storage_options,
+        mount_point,
+        fs_group: protobuf::MessageField::none(),
+        shared: volume.shared,
+        special_fields: ::protobuf::SpecialFields::new(),
+    });
+
+    p_mounts.push(policy::KataMount {
+        destination: yaml_mount.mountPath.to_string(),
+        type_: volume.mount_type.clone(),
+        source: volume.mount_source.clone(),
+        options: mount_options,
+    });
 }
 
 fn get_config_map_mount_and_storage(

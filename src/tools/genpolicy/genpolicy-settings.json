@@ -223,6 +223,15 @@
                 "rprivate",
                 "rw"
             ]
+        },
+        "hostPath_block": {
+            "mount_type": "bind",
+            "mount_source": "",
+            "mount_point": "^$(cpath)/[a-z0-9]{1,10}-[a-z0-9]{8}-$(file_name)$",
+            "driver": "scsi",
+            "driver_options": [],
+            "fstype": "ext4",
+            "shared": false
         }
     },
     "devices": {
